@@ -1,7 +1,3 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 import ray.experimental.array.remote as ra
 import ray
@@ -9,21 +5,23 @@ import ray
 BLOCK_SIZE = 10
 
 
-class DistArray(object):
-    def __init__(self, shape, objectids=None):
+class DistArray:
+    def __init__(self, shape, object_refs=None):
         self.shape = shape
         self.ndim = len(shape)
-        self.num_blocks = [int(np.ceil(1.0 * a / BLOCK_SIZE))
-                           for a in self.shape]
-        if objectids is not None:
-            self.objectids = objectids
+        self.num_blocks = [
+            int(np.ceil(1.0 * a / BLOCK_SIZE)) for a in self.shape
+        ]
+        if object_refs is not None:
+            self.object_refs = object_refs
         else:
-            self.objectids = np.empty(self.num_blocks, dtype=object)
-        if self.num_blocks != list(self.objectids.shape):
-            raise Exception("The fields `num_blocks` and `objectids` are "
-                            "inconsistent, `num_blocks` is {} and `objectids` "
-                            "has shape {}".format(self.num_blocks,
-                                                  list(self.objectids.shape)))
+            self.object_refs = np.empty(self.num_blocks, dtype=object)
+        if self.num_blocks != list(self.object_refs.shape):
+            raise Exception(
+                "The fields `num_blocks` and `object_refs` are "
+                "inconsistent, `num_blocks` is {} and `object_refs` "
+                "has shape {}".format(self.num_blocks,
+                                      list(self.object_refs.shape)))
 
     @staticmethod
     def compute_block_lower(index, shape):
@@ -55,15 +53,15 @@ class DistArray(object):
         return [int(np.ceil(1.0 * a / BLOCK_SIZE)) for a in shape]
 
     def assemble(self):
-        """Assemble an array from a distributed array of object IDs."""
-        first_block = ray.get(self.objectids[(0,) * self.ndim])
+        """Assemble an array from a distributed array of object refs."""
+        first_block = ray.get(self.object_refs[(0, ) * self.ndim])
         dtype = first_block.dtype
         result = np.zeros(self.shape, dtype=dtype)
         for index in np.ndindex(*self.num_blocks):
             lower = DistArray.compute_block_lower(index, self.shape)
             upper = DistArray.compute_block_upper(index, self.shape)
-            result[[slice(l, u) for (l, u) in zip(lower, upper)]] = ray.get(
-                self.objectids[index])
+            value = ray.get(self.object_refs[index])
+            result[tuple(slice(l, u) for (l, u) in zip(lower, upper))] = value
         return result
 
     def __getitem__(self, sliced):
@@ -85,8 +83,8 @@ def numpy_to_dist(a):
     for index in np.ndindex(*result.num_blocks):
         lower = DistArray.compute_block_lower(index, a.shape)
         upper = DistArray.compute_block_upper(index, a.shape)
-        result.objectids[index] = ray.put(a[[slice(l, u) for (l, u)
-                                            in zip(lower, upper)]])
+        idx = tuple(slice(l, u) for (l, u) in zip(lower, upper))
+        result.object_refs[index] = ray.put(a[idx])
     return result
 
 
@@ -94,7 +92,7 @@ def numpy_to_dist(a):
 def zeros(shape, dtype_name="float"):
     result = DistArray(shape)
     for index in np.ndindex(*result.num_blocks):
-        result.objectids[index] = ra.zeros.remote(
+        result.object_refs[index] = ra.zeros.remote(
             DistArray.compute_block_shape(index, shape), dtype_name=dtype_name)
     return result
 
@@ -103,7 +101,7 @@ def zeros(shape, dtype_name="float"):
 def ones(shape, dtype_name="float"):
     result = DistArray(shape)
     for index in np.ndindex(*result.num_blocks):
-        result.objectids[index] = ra.ones.remote(
+        result.object_refs[index] = ra.ones.remote(
             DistArray.compute_block_shape(index, shape), dtype_name=dtype_name)
     return result
 
@@ -114,7 +112,7 @@ def copy(a):
     for index in np.ndindex(*result.num_blocks):
         # We don't need to actually copy the objects because remote objects are
         # immutable.
-        result.objectids[index] = a.objectids[index]
+        result.object_refs[index] = a.object_refs[index]
     return result
 
 
@@ -126,12 +124,11 @@ def eye(dim1, dim2=-1, dtype_name="float"):
     for (i, j) in np.ndindex(*result.num_blocks):
         block_shape = DistArray.compute_block_shape([i, j], shape)
         if i == j:
-            result.objectids[i, j] = ra.eye.remote(block_shape[0],
-                                                   block_shape[1],
-                                                   dtype_name=dtype_name)
+            result.object_refs[i, j] = ra.eye.remote(
+                block_shape[0], block_shape[1], dtype_name=dtype_name)
         else:
-            result.objectids[i, j] = ra.zeros.remote(block_shape,
-                                                     dtype_name=dtype_name)
+            result.object_refs[i, j] = ra.zeros.remote(
+                block_shape, dtype_name=dtype_name)
     return result
 
 
@@ -143,11 +140,12 @@ def triu(a):
     result = DistArray(a.shape)
     for (i, j) in np.ndindex(*result.num_blocks):
         if i < j:
-            result.objectids[i, j] = ra.copy.remote(a.objectids[i, j])
+            result.object_refs[i, j] = ra.copy.remote(a.object_refs[i, j])
         elif i == j:
-            result.objectids[i, j] = ra.triu.remote(a.objectids[i, j])
+            result.object_refs[i, j] = ra.triu.remote(a.object_refs[i, j])
         else:
-            result.objectids[i, j] = ra.zeros_like.remote(a.objectids[i, j])
+            result.object_refs[i, j] = ra.zeros_like.remote(
+                a.object_refs[i, j])
     return result
 
 
@@ -159,11 +157,12 @@ def tril(a):
     result = DistArray(a.shape)
     for (i, j) in np.ndindex(*result.num_blocks):
         if i > j:
-            result.objectids[i, j] = ra.copy.remote(a.objectids[i, j])
+            result.object_refs[i, j] = ra.copy.remote(a.object_refs[i, j])
         elif i == j:
-            result.objectids[i, j] = ra.tril.remote(a.objectids[i, j])
+            result.object_refs[i, j] = ra.tril.remote(a.object_refs[i, j])
         else:
-            result.objectids[i, j] = ra.zeros_like.remote(a.objectids[i, j])
+            result.object_refs[i, j] = ra.zeros_like.remote(
+                a.object_refs[i, j])
     return result
 
 
@@ -190,13 +189,13 @@ def dot(a, b):
                         "b.ndim = {}.".format(b.ndim))
     if a.shape[1] != b.shape[0]:
         raise Exception("dot expects a.shape[1] to equal b.shape[0], but "
-                        "a.shape = {} and b.shape = {}.".format(a.shape,
-                                                                b.shape))
+                        "a.shape = {} and b.shape = {}.".format(
+                            a.shape, b.shape))
     shape = [a.shape[0], b.shape[1]]
     result = DistArray(shape)
     for (i, j) in np.ndindex(*result.num_blocks):
-        args = list(a.objectids[i, :]) + list(b.objectids[:, j])
-        result.objectids[i, j] = blockwise_dot.remote(*args)
+        args = list(a.object_refs[i, :]) + list(b.object_refs[:, j])
+        result.object_refs[i, j] = blockwise_dot.remote(*args)
     return result
 
 
@@ -207,9 +206,9 @@ def subblocks(a, *ranges):
     the `a`. The result and `a` will have the same number of dimensions. For
     example,
         subblocks(a, [0, 1], [2, 4])
-    will produce a DistArray whose objectids are
-        [[a.objectids[0, 2], a.objectids[0, 4]],
-         [a.objectids[1, 2], a.objectids[1, 4]]]
+    will produce a DistArray whose object_refs are
+        [[a.object_refs[0, 2], a.object_refs[0, 4]],
+         [a.object_refs[1, 2], a.object_refs[1, 4]]]
     We allow the user to pass in an empty list [] to indicate the full range.
     """
     ranges = list(ranges)
@@ -227,8 +226,8 @@ def subblocks(a, *ranges):
                             "the {}th range is {}.".format(i, ranges[i]))
         if ranges[i][0] < 0:
             raise Exception("Values in the ranges passed to sub_blocks must "
-                            "be at least 0, but the {}th range is {}."
-                            .format(i, ranges[i]))
+                            "be at least 0, but the {}th range is {}.".format(
+                                i, ranges[i]))
         if ranges[i][-1] >= a.num_blocks[i]:
             raise Exception("Values in the ranges passed to sub_blocks must "
                             "be less than the relevant number of blocks, but "
@@ -240,8 +239,8 @@ def subblocks(a, *ranges):
              for i in range(a.ndim)]
     result = DistArray(shape)
     for index in np.ndindex(*result.num_blocks):
-        result.objectids[index] = a.objectids[tuple([ranges[i][index[i]]
-                                              for i in range(a.ndim)])]
+        result.object_refs[index] = a.object_refs[tuple(
+            ranges[i][index[i]] for i in range(a.ndim))]
     return result
 
 
@@ -249,12 +248,12 @@ def subblocks(a, *ranges):
 def transpose(a):
     if a.ndim != 2:
         raise Exception("transpose expects its argument to be 2-dimensional, "
-                        "but a.ndim = {}, a.shape = {}.".format(a.ndim,
-                                                                a.shape))
+                        "but a.ndim = {}, a.shape = {}.".format(
+                            a.ndim, a.shape))
     result = DistArray([a.shape[1], a.shape[0]])
     for i in range(result.num_blocks[0]):
         for j in range(result.num_blocks[1]):
-            result.objectids[i, j] = ra.transpose.remote(a.objectids[j, i])
+            result.object_refs[i, j] = ra.transpose.remote(a.object_refs[j, i])
     return result
 
 
@@ -263,12 +262,12 @@ def transpose(a):
 def add(x1, x2):
     if x1.shape != x2.shape:
         raise Exception("add expects arguments `x1` and `x2` to have the same "
-                        "shape, but x1.shape = {}, and x2.shape = {}."
-                        .format(x1.shape, x2.shape))
+                        "shape, but x1.shape = {}, and x2.shape = {}.".format(
+                            x1.shape, x2.shape))
     result = DistArray(x1.shape)
     for index in np.ndindex(*result.num_blocks):
-        result.objectids[index] = ra.add.remote(x1.objectids[index],
-                                                x2.objectids[index])
+        result.object_refs[index] = ra.add.remote(x1.object_refs[index],
+                                                  x2.object_refs[index])
     return result
 
 
@@ -281,6 +280,6 @@ def subtract(x1, x2):
                         .format(x1.shape, x2.shape))
     result = DistArray(x1.shape)
     for index in np.ndindex(*result.num_blocks):
-        result.objectids[index] = ra.subtract.remote(x1.objectids[index],
-                                                     x2.objectids[index])
+        result.object_refs[index] = ra.subtract.remote(x1.object_refs[index],
+                                                       x2.object_refs[index])
     return result

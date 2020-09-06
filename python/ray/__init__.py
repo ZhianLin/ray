@@ -1,40 +1,156 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
+import logging
+from os.path import dirname
+import platform
 import sys
-# Add the directory containing pyarrow to the Python path so that we find the
-# pyarrow version packaged with ray and not a pre-existing pyarrow.
-pyarrow_path = os.path.join(os.path.abspath(os.path.dirname(__file__)),
-                            "pyarrow_files")
-sys.path.insert(0, pyarrow_path)
 
-from ray.worker import (register_class, error_info, init, connect, disconnect,
-                        get, put, wait, remote, log_event, log_span,
-                        flush_log, get_gpu_ids)  # noqa: E402
-from ray.worker import (SCRIPT_MODE, WORKER_MODE, PYTHON_MODE,
-                        SILENT_MODE)  # noqa: E402
-from ray.worker import global_state  # noqa: E402
+logger = logging.getLogger(__name__)
+
+# MUST add pickle5 to the import path because it will be imported by some
+# raylet modules.
+
+if "pickle5" in sys.modules:
+    import pkg_resources
+    version_info = pkg_resources.require("pickle5")
+    version = tuple(int(n) for n in version_info[0].version.split("."))
+    if version < (0, 0, 10):
+        raise ImportError("You are using an old version of pickle5 that "
+                          "leaks memory, please run 'pip install pickle5 -U' "
+                          "to upgrade")
+
+if "OMP_NUM_THREADS" not in os.environ:
+    logger.debug("[ray] Forcing OMP_NUM_THREADS=1 to avoid performance "
+                 "degradation with many workers (issue #6998). You can "
+                 "override this by explicitly setting OMP_NUM_THREADS.")
+    os.environ["OMP_NUM_THREADS"] = "1"
+
+# Add the directory containing pickle5 to the Python path so that we find the
+# pickle5 version packaged with ray and not a pre-existing pickle5.
+pickle5_path = os.path.join(
+    os.path.abspath(os.path.dirname(__file__)), "pickle5_files")
+sys.path.insert(0, pickle5_path)
+
+# Importing psutil & setproctitle. Must be before ray._raylet is initialized.
+thirdparty_files = os.path.join(
+    os.path.abspath(os.path.dirname(__file__)), "thirdparty_files")
+sys.path.insert(0, thirdparty_files)
+
+if sys.platform == "win32":
+    import ray.compat  # noqa: E402
+    ray.compat.patch_redis_empty_recv()
+
+if (platform.system() == "Linux"
+        and "Microsoft".lower() in platform.release().lower()):
+    import ray.compat  # noqa: E402
+    ray.compat.patch_psutil()
+
+# Expose ray ABI symbols which may be dependent by other shared
+# libraries such as _streaming.so. See BUILD.bazel:_raylet
+python_shared_lib_suffix = ".so" if sys.platform != "win32" else ".pyd"
+so_path = os.path.join(dirname(__file__), "_raylet" + python_shared_lib_suffix)
+if os.path.exists(so_path):
+    import ctypes
+    from ctypes import CDLL
+    CDLL(so_path, ctypes.RTLD_GLOBAL)
+
+import ray._raylet  # noqa: E402
+
+from ray._raylet import (
+    ActorCheckpointID,
+    ActorClassID,
+    ActorID,
+    ClientID,
+    Config as _Config,
+    JobID,
+    WorkerID,
+    FunctionID,
+    ObjectID,
+    ObjectRef,
+    TaskID,
+    UniqueID,
+    Language,
+    PlacementGroupID,
+)  # noqa: E402
+
+_config = _Config()
+
+from ray.profiling import profile  # noqa: E402
+from ray.state import (jobs, nodes, actors, objects, timeline,
+                       object_transfer_timeline, cluster_resources,
+                       available_resources)  # noqa: E402
+from ray.worker import (  # noqa: F401
+    LOCAL_MODE, SCRIPT_MODE, WORKER_MODE, IO_WORKER_MODE, cancel, connect,
+    disconnect, get, get_actor, get_gpu_ids, get_resource_ids,
+    get_dashboard_url, init, is_initialized, put, kill, remote, shutdown,
+    show_in_dashboard, wait,
+)  # noqa: E402
+import ray.internal  # noqa: E402
 # We import ray.actor because some code is run in actor.py which initializes
 # some functions in the worker.
 import ray.actor  # noqa: F401
+from ray.actor import method  # noqa: E402
+from ray.cross_language import java_function, java_actor_class  # noqa: E402
+from ray.runtime_context import get_runtime_context  # noqa: E402
+from ray import util  # noqa: E402
 
-# Ray version string. TODO(rkn): This is also defined separately in setup.py.
-# Fix this.
-__version__ = "0.1.2"
+# Replaced with the current commit when building the wheels.
+__commit__ = "{{RAY_COMMIT_SHA}}"
+__version__ = "0.9.0.dev0"
 
-__all__ = ["register_class", "error_info", "init", "connect", "disconnect",
-           "get", "put", "wait", "remote", "log_event", "log_span",
-           "flush_log", "actor", "get_gpu_ids", "SCRIPT_MODE", "WORKER_MODE",
-           "PYTHON_MODE", "SILENT_MODE", "global_state", "__version__"]
+__all__ = [
+    "__version__",
+    "_config",
+    "get_runtime_context",
+    "actor",
+    "actors",
+    "available_resources",
+    "cancel",
+    "cluster_resources",
+    "connect",
+    "disconnect",
+    "get",
+    "get_actor",
+    "get_gpu_ids",
+    "get_resource_ids",
+    "get_dashboard_url",
+    "init",
+    "internal",
+    "is_initialized",
+    "java_actor_class",
+    "java_function",
+    "jobs",
+    "kill",
+    "Language",
+    "method",
+    "nodes",
+    "objects",
+    "object_transfer_timeline",
+    "profile",
+    "put",
+    "remote",
+    "shutdown",
+    "show_in_dashboard",
+    "timeline",
+    "util",
+    "wait",
+    "LOCAL_MODE",
+    "PYTHON_MODE",
+    "SCRIPT_MODE",
+    "WORKER_MODE",
+]
 
-import ctypes  # noqa: E402
-# Windows only
-if hasattr(ctypes, "windll"):
-    # Makes sure that all child processes die when we die. Also makes sure that
-    # fatal crashes result in process termination rather than an error dialog
-    # (the latter is annoying since we have a lot of processes). This is done
-    # by associating all child processes with a "job" object that imposes this
-    # behavior.
-    (lambda kernel32: (lambda job: (lambda n: kernel32.SetInformationJobObject(job, 9, "\0" * 17 + chr(0x8 | 0x4 | 0x20) + "\0" * (n - 18), n))(0x90 if ctypes.sizeof(ctypes.c_void_p) > ctypes.sizeof(ctypes.c_int) else 0x70) and kernel32.AssignProcessToJobObject(job, ctypes.c_void_p(kernel32.GetCurrentProcess())))(ctypes.c_void_p(kernel32.CreateJobObjectW(None, None))) if kernel32 is not None else None)(ctypes.windll.kernel32)  # noqa: E501
+# ID types
+__all__ += [
+    "ActorCheckpointID",
+    "ActorClassID",
+    "ActorID",
+    "ClientID",
+    "JobID",
+    "WorkerID",
+    "FunctionID",
+    "ObjectID",
+    "ObjectRef",
+    "TaskID",
+    "UniqueID",
+    "PlacementGroupID",
+]
